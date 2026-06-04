@@ -37,5 +37,6 @@ CREATE TABLE messages (
   order_id INTEGER REFERENCES orders(id),
   sender_id INTEGER REFERENCES users(id),
   text TEXT,
+  admin_read BOOLEAN DEFAULT false,
   created_at TIMESTAMP DEFAULT NOW()
 );
