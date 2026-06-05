@@ -1,11 +1,10 @@
 const { Pool } = require('pg');
 
-// Если задана переменная DATABASE_URL (Render), используем её
-// Иначе собираем подключение из отдельных переменных (локальная разработка)
 const pool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false } // Обязательно для Supabase
+      ssl: { rejectUnauthorized: false },
+      family: 4           // <-- Только IPv4, чтобы избежать ENETUNREACH
     })
   : new Pool({
       host: process.env.DB_HOST || 'localhost',
