@@ -43,3 +43,7 @@ CREATE TABLE messages (
 INSERT INTO orders (id, client_id, pickup_address, delivery_address, description, price, status)
 VALUES (0, 1, 'support', 'support', 'Чат поддержки', 0, 'support')
 ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO orders (id, client_id, pickup_address, delivery_address, description, price, status)
+VALUES (0, 1, 'support', 'support', 'Чат поддержки', 0, 'support')
+ON CONFLICT (id) DO NOTHING;
