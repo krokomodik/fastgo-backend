@@ -40,3 +40,6 @@ CREATE TABLE messages (
   admin_read BOOLEAN DEFAULT false,
   created_at TIMESTAMP DEFAULT NOW()
 );
+INSERT INTO orders (id, client_id, pickup_address, delivery_address, description, price, status)
+VALUES (0, 1, 'support', 'support', 'Чат поддержки', 0, 'support')
+ON CONFLICT (id) DO NOTHING;
