@@ -1,0 +1,9 @@
+version: 1
+service:
+  name: fastgo-backend
+  type: backend
+  build:
+    command: npm install
+  run:
+    command: node server.js
+    port: 3000
