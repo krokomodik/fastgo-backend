@@ -1,9 +1,13 @@
-version: 1
-service:
-  name: fastgo-backend
-  type: backend
-  build:
-    command: npm install
-  run:
-    command: node server.js
-    port: 3000
+meta:
+  environment: node
+  toolchain:
+    name: npm
+    version: 18
+
+build:
+  artifacts:
+    '*': /
+
+run:
+  scriptName: server.js
+  containerPort: 3000
