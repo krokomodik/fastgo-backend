@@ -25,6 +25,7 @@ async function sendPushNotifications(messages) {
     try {
       const tickets = await expo.sendPushNotificationsAsync(chunk);
       console.log('Результаты push:', JSON.stringify(tickets));
+      // Проверяем наличие ошибок
       for (let i = 0; i < tickets.length; i++) {
         const ticket = tickets[i];
         if (ticket.status === 'error') {
@@ -36,6 +37,7 @@ async function sendPushNotifications(messages) {
     }
   }
 }
+
 
 async function getUserPushTokens(userId) {
   const res = await pool.query('SELECT token FROM push_tokens WHERE user_id = $1', [userId]);
@@ -126,7 +128,7 @@ function authenticate(req, res, next) {
   }
 }
 
-// Валидация ИНН
+// Валидация ИНН (контрольная сумма)
 function validateInn(inn) {
   if (!/^\d{12}$/.test(inn)) return false;
   const coefficients1 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8];
@@ -134,7 +136,7 @@ function validateInn(inn) {
   const digits = inn.split('').map(Number);
   const n11 = digits.slice(0, 10).reduce((sum, d, i) => sum + d * coefficients1[i], 0) % 11 % 10;
   const n12 = digits.slice(0, 11).reduce((sum, d, i) => sum + d * coefficients2[i], 0) % 11 % 10;
-  return n11 === digits[10] && n12 === digits[11];
+  return n11 === digits[10] && n12 === digits[12] ? true : false;
 }
 
 // Регистрация
@@ -144,7 +146,8 @@ app.post('/api/register', async (req, res) => {
     passport_series, passport_number, passport_issued_by, passport_issued_date,
     inn, transport,
     accepted_policy, accepted_agreement,
-    photo_passport, photo_face, region_id
+    photo_passport,
+    photo_face
   } = req.body;
 
   try {
@@ -156,8 +159,8 @@ app.post('/api/register', async (req, res) => {
         passport_series, passport_number, passport_issued_by, passport_issued_date,
         inn, transport,
         application_status, accepted_policy, accepted_agreement, agreed_at,
-        photo_passport, photo_face, region_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+        photo_passport, photo_face)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
        RETURNING id, name, email, role, application_status`,
       [
         name, phone, email, hashedPassword, address, role || 'client',
@@ -168,8 +171,7 @@ app.post('/api/register', async (req, res) => {
         accepted_agreement || false,
         (accepted_policy || accepted_agreement) ? new Date().toISOString() : null,
         photo_passport || null,
-        photo_face || null,
-        region_id || null
+        photo_face || null
       ]
     );
 
@@ -215,30 +217,24 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Логин (с проверкой блокировки)
+// Логин
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   try {
     const user = await pool.query('SELECT * FROM users WHERE email=$1', [email]);
     if (user.rows.length === 0) return res.status(400).json({ error: 'Пользователь не найден' });
-    const u = user.rows[0];
-    const valid = await bcrypt.compare(password, u.password);
+    const valid = await bcrypt.compare(password, user.rows[0].password);
     if (!valid) return res.status(400).json({ error: 'Неверный пароль' });
-
-    if (u.is_blocked) {
-      return res.status(403).json({ error: 'Аккаунт заблокирован', reason: u.block_reason || 'Причина не указана' });
-    }
-
     const token = jwt.sign(
-      { id: u.id, email: u.email, role: u.role },
+      { id: user.rows[0].id, email: user.rows[0].email, role: user.rows[0].role },
       JWT_SECRET,
       { expiresIn: '365d' }
     );
     res.json({ token, user: { 
-      id: u.id, 
-      name: u.name, 
-      role: u.role,
-      application_status: u.application_status || 'approved'
+      id: user.rows[0].id, 
+      name: user.rows[0].name, 
+      role: user.rows[0].role,
+      application_status: user.rows[0].application_status || 'approved'
     }});
   } catch (err) {
     res.status(500).json({ error: 'Ошибка входа' });
@@ -261,7 +257,7 @@ app.post('/api/push-token', authenticate, async (req, res) => {
   }
 });
 
-// Создание заказа (клиент) – обновлённый для shop/parcel/pvz
+// Создание заказа (клиент) – обновлённый для shop/parcel
 app.post('/api/order/create', authenticate, async (req, res) => {
   const {
     type,
@@ -274,9 +270,7 @@ app.post('/api/order/create', authenticate, async (req, res) => {
     description,
     price,
     delivery_price,
-    payment_method,
-    pvz_code_image, // base64 для ПВЗ
-    pvz_address
+    payment_method
   } = req.body;
 
   if (req.user.role !== 'client') return res.status(403).json({ error: 'Только клиенты могут создавать заказы' });
@@ -289,13 +283,12 @@ app.post('/api/order/create', authenticate, async (req, res) => {
     const insertResult = await pool.query(
       `INSERT INTO orders
        (client_id, type, category, pickup_address, delivery_address, description, price, status, confirmation_code,
-        max_product_amount, message_for_courier, pvz_code_image, pvz_address)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'new',$8,$9,$10,$11,$12)
+        max_product_amount, message_for_courier)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'new',$8,$9,$10)
        RETURNING *`,
       [client, orderType, category || null, pickup_address || null, delivery_address,
        description || null, price || 500, confirmationCode,
-       max_product_amount || null, message_for_courier || null,
-       pvz_code_image || null, pvz_address || null]
+       max_product_amount || null, message_for_courier || null]
     );
     const newOrder = insertResult.rows[0];
 
@@ -317,28 +310,26 @@ app.post('/api/order/create', authenticate, async (req, res) => {
   }
 });
 
-// Получить все заказы (фильтр для курьера: убрано ограничение по времени для истории)
+// Получить все заказы (фильтр для курьера: только paid)
 app.get('/api/orders', authenticate, async (req, res) => {
   try {
     let orders;
     if (req.user.role === 'admin') {
       orders = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
     } else if (req.user.role === 'client') {
-  orders = await pool.query(
-    `SELECT o.*,
-            u.name AS courier_name,
-            u.photo_face AS courier_photo,
-            COALESCE(
-              (SELECT ROUND(AVG(rating)::numeric, 1) FROM reviews WHERE courier_id = o.courier_id),
-              0
-            ) AS courier_rating
-     FROM orders o
-     LEFT JOIN users u ON u.id = o.courier_id
-     WHERE o.client_id = $1
-     ORDER BY o.created_at DESC`,
-    [req.user.id]
-  );
-}
+      orders = await pool.query('SELECT * FROM orders WHERE client_id=$1 ORDER BY created_at DESC', [req.user.id]);
+    } else if (req.user.role === 'courier') {
+      orders = await pool.query(
+        `SELECT o.*, 
+           (SELECT json_agg(json_build_object('name', oi.name, 'note', oi.note) ORDER BY oi.sort_order)
+            FROM order_items oi WHERE oi.order_id = o.id) AS items
+         FROM orders o
+         WHERE (o.courier_id=$1 OR o.status='paid')
+           AND (o.status != 'delivered' OR o.created_at > NOW() - INTERVAL '30 minutes')
+         ORDER BY o.created_at DESC`,
+        [req.user.id]
+      );
+    }
     res.json(orders.rows);
   } catch (err) {
     console.error('Ошибка получения заказов:', err);
@@ -471,7 +462,7 @@ app.post('/api/order/finish', authenticate, async (req, res) => {
   }
 });
 
-// Геолокация курьера
+// Обновление геолокации курьера
 app.post('/api/courier/location', authenticate, async (req, res) => {
   if (req.user.role !== 'courier') return res.status(403).json({ error: 'Только курьеры' });
   const { lat, lng } = req.body;
@@ -503,28 +494,24 @@ app.post('/api/courier/status', authenticate, async (req, res) => {
   }
 });
 
-// Профиль текущего пользователя (добавлен регион)
+// Профиль текущего пользователя
 app.get('/api/profile', authenticate, async (req, res) => {
   try {
     let user;
     if (req.user.role === 'courier') {
       user = await pool.query(
         `SELECT u.id, u.name, u.phone, u.email, u.address, u.role,
-                u.application_status, u.region_id, r.name as region_name,
+                u.application_status,
                 c.lat, c.lng, c.transport, c.is_online
          FROM users u
          LEFT JOIN couriers c ON c.user_id = u.id
-         LEFT JOIN regions r ON u.region_id = r.id
          WHERE u.id = $1`,
         [req.user.id]
       );
     } else {
       user = await pool.query(
-        `SELECT u.id, u.name, u.phone, u.email, u.address, u.role, u.application_status,
-                u.region_id, r.name as region_name
-         FROM users u
-         LEFT JOIN regions r ON u.region_id = r.id
-         WHERE u.id=$1`,
+        `SELECT id, name, phone, email, address, role, application_status
+         FROM users WHERE id=$1`,
         [req.user.id]
       );
     }
@@ -537,13 +524,13 @@ app.get('/api/profile', authenticate, async (req, res) => {
   }
 });
 
-// Обновление профиля (добавлен region_id)
+// Обновление профиля
 app.put('/api/profile', authenticate, async (req, res) => {
-  const { name, address, transport, region_id } = req.body;
+  const { name, address, transport } = req.body;
   try {
     await pool.query(
-      'UPDATE users SET name = COALESCE($1, name), address = COALESCE($2, address), region_id = COALESCE($3, region_id) WHERE id = $4',
-      [name, address, region_id, req.user.id]
+      'UPDATE users SET name = COALESCE($1, name), address = COALESCE($2, address) WHERE id = $3',
+      [name, address, req.user.id]
     );
     if (req.user.role === 'courier' && transport !== undefined) {
       await pool.query('UPDATE couriers SET transport = $1 WHERE user_id = $2', [transport, req.user.id]);
@@ -634,19 +621,15 @@ app.get('/api/orders/:id/messages', authenticate, async (req, res) => {
   }
 });
 
-// ================== ПОДСКАЗКИ DADATA (с учётом региона) ==================
+// ================== ПОДСКАЗКИ DADATA ==================
 const fetch = require('node-fetch');
 const DADATA_KEY = '8ec245ded8a5eb0c76913ecebbe0699c56545de5';
 
 app.get('/api/suggest', authenticate, async (req, res) => {
-  const { text, region } = req.query;
+  const { text } = req.query;
   if (!text || text.length < 2) return res.json({ results: [] });
   try {
     const url = 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address';
-    const body = { query: text, count: 5, language: 'ru' };
-    if (region) {
-      body.locations = [{ region }];
-    }
     const options = {
       method: 'POST',
       headers: {
@@ -654,7 +637,7 @@ app.get('/api/suggest', authenticate, async (req, res) => {
         'Accept': 'application/json',
         'Authorization': `Token ${DADATA_KEY}`
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify({ query: text, count: 5, language: 'ru' })
     };
     const resp = await fetch(url, options);
     const data = await resp.json();
@@ -669,16 +652,11 @@ app.get('/api/suggest', authenticate, async (req, res) => {
   }
 });
 
-// ================== РАСЧЁТ ЦЕНЫ (посылка) – динамические тарифы ==================
+// ================== РАСЧЁТ ЦЕНЫ (посылка) ==================
 app.post('/api/calculate-price', authenticate, async (req, res) => {
   const { pickup_address, delivery_address } = req.body;
   if (!pickup_address || !delivery_address) return res.status(400).json({ error: 'Нужны оба адреса' });
   try {
-    const basePriceRes = await pool.query("SELECT value FROM settings WHERE key='base_price'");
-    const pricePerKmRes = await pool.query("SELECT value FROM settings WHERE key='price_per_km'");
-    const basePrice = parseFloat(basePriceRes.rows[0]?.value || '100');
-    const pricePerKm = parseFloat(pricePerKmRes.rows[0]?.value || '20');
-
     const geocode = async (address) => {
       const url = 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address';
       const options = {
@@ -699,13 +677,13 @@ app.post('/api/calculate-price', authenticate, async (req, res) => {
       return null;
     };
     const [pickup, delivery] = await Promise.all([geocode(pickup_address), geocode(delivery_address)]);
-    if (!pickup || !delivery) return res.json({ price: basePrice * 5, distance: '0.0', fixed: true });
+    if (!pickup || !delivery) return res.json({ price: 500, distance: '0.0', fixed: true });
     const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${pickup.lng},${pickup.lat};${delivery.lng},${delivery.lat}?overview=false`;
     const routeResp = await fetch(osrmUrl);
     const routeData = await routeResp.json();
-    if (!routeData.routes || routeData.routes.length === 0) return res.json({ price: basePrice * 5, distance: '0.0', fixed: true });
+    if (!routeData.routes || routeData.routes.length === 0) return res.json({ price: 500, distance: '0.0', fixed: true });
     const distanceKm = routeData.routes[0].distance / 1000;
-    const price = Math.round(basePrice + distanceKm * pricePerKm);
+    const price = Math.round(100 + distanceKm * 20);
     res.json({ price, distance: distanceKm.toFixed(1) });
   } catch (e) {
     console.error('Ошибка расчёта цены:', e);
@@ -713,16 +691,11 @@ app.post('/api/calculate-price', authenticate, async (req, res) => {
   }
 });
 
-// ================== РАСЧЁТ ДОСТАВКИ ДЛЯ ПРОДУКТОВ – динамические тарифы ==================
+// ================== РАСЧЁТ ДОСТАВКИ ДЛЯ ПРОДУКТОВ ==================
 app.post('/api/calculate-delivery', authenticate, async (req, res) => {
   const { address } = req.body;
   if (!address) return res.status(400).json({ error: 'Адрес не указан' });
   try {
-    const baseRes = await pool.query("SELECT value FROM settings WHERE key='shop_base_price'");
-    const perKmRes = await pool.query("SELECT value FROM settings WHERE key='shop_price_per_km'");
-    const basePrice = parseFloat(baseRes.rows[0]?.value || '200');
-    const pricePerKm = parseFloat(perKmRes.rows[0]?.value || '15');
-
     const geoUrl = 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address';
     const resp = await fetch(geoUrl, {
       method: 'POST',
@@ -738,58 +711,14 @@ app.post('/api/calculate-delivery', authenticate, async (req, res) => {
       const routeData = await routeResp.json();
       if (routeData.routes?.length) {
         const distanceKm = routeData.routes[0].distance / 1000;
-        const price = Math.round(basePrice + distanceKm * pricePerKm);
+        const price = Math.round(200 + distanceKm * 15);
         return res.json({ price });
       }
     }
-    res.json({ price: basePrice });
+    res.json({ price: 250 });
   } catch (e) {
     console.error('Ошибка расчёта доставки:', e);
     res.json({ price: 250 });
-  }
-});
-
-// ================== РАСЧЁТ ДОСТАВКИ ДЛЯ ПВЗ (новый) ==================
-app.post('/api/calculate-pvz', authenticate, async (req, res) => {
-  const { pvz_address, delivery_address } = req.body;
-  if (!pvz_address || !delivery_address) return res.status(400).json({ error: 'Нужны оба адреса' });
-  try {
-    const baseRes = await pool.query("SELECT value FROM settings WHERE key='pvz_base_price'");
-    const perKmRes = await pool.query("SELECT value FROM settings WHERE key='pvz_price_per_km'");
-    const basePrice = parseFloat(baseRes.rows[0]?.value || '150');
-    const pricePerKm = parseFloat(perKmRes.rows[0]?.value || '15');
-
-    const geocode = async (address) => {
-      const url = 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address';
-      const options = {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': `Token ${DADATA_KEY}`
-        },
-        body: JSON.stringify({ query: address, count: 1 })
-      };
-      const resp = await fetch(url, options);
-      const data = await resp.json();
-      const first = data.suggestions?.[0];
-      if (first && first.data?.geo_lat && first.data?.geo_lon) {
-        return { lat: parseFloat(first.data.geo_lat), lng: parseFloat(first.data.geo_lon) };
-      }
-      return null;
-    };
-    const [pvz, delivery] = await Promise.all([geocode(pvz_address), geocode(delivery_address)]);
-    if (!pvz || !delivery) return res.json({ price: basePrice * 3, distance: '0.0', fixed: true });
-    const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${pvz.lng},${pvz.lat};${delivery.lng},${delivery.lat}?overview=false`;
-    const routeResp = await fetch(osrmUrl);
-    const routeData = await routeResp.json();
-    if (!routeData.routes || routeData.routes.length === 0) return res.json({ price: basePrice * 3, distance: '0.0', fixed: true });
-    const distanceKm = routeData.routes[0].distance / 1000;
-    const price = Math.round(basePrice + distanceKm * pricePerKm);
-    res.json({ price, distance: distanceKm.toFixed(1) });
-  } catch (e) {
-    console.error('Ошибка расчёта ПВЗ:', e);
-    res.json({ price: 300, distance: '0.0', fixed: true });
   }
 });
 
@@ -950,10 +879,10 @@ app.post('/api/payment/ozon-webhook', async (req, res) => {
 
 // ================== АДМИН‑ЭНДПОИНТЫ ==================
 app.get('/api/admin/users', authenticate, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Только для админа' });
   const { search } = req.query;
   try {
-    let query = `SELECT id, name, phone, email, address, role, is_blocked, block_reason FROM users WHERE role = 'client'`;
+    let query = `SELECT id, name, phone, email, address, role FROM users WHERE role = 'client'`;
     const params = [];
     if (search) {
       query += ` AND (name ILIKE $1 OR phone ILIKE $1 OR email ILIKE $1 OR CAST(id AS TEXT) = $2)`;
@@ -969,13 +898,13 @@ app.get('/api/admin/users', authenticate, async (req, res) => {
 });
 
 app.get('/api/admin/couriers', authenticate, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Только для админа' });
   const { search } = req.query;
   try {
     let query = `
       SELECT u.id, u.name, u.phone, u.email, u.address,
              u.passport_series, u.passport_number, u.passport_issued_by, u.passport_issued_date,
-             u.inn, u.transport, u.is_blocked, u.block_reason,
+             u.inn, u.transport,
              c.full_name, c.transport as courier_transport, c.is_online, c.lat, c.lng,
              u.photo_passport, u.photo_face
       FROM users u
@@ -997,7 +926,7 @@ app.get('/api/admin/couriers', authenticate, async (req, res) => {
 });
 
 app.get('/api/admin/chats', authenticate, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Только для админа' });
   try {
     const senders = await pool.query(
       `SELECT DISTINCT m.sender_id, u.name, u.role,
@@ -1015,7 +944,7 @@ app.get('/api/admin/chats', authenticate, async (req, res) => {
 });
 
 app.get('/api/admin/chat/:userId', authenticate, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Только для админа' });
   const { userId } = req.params;
   try {
     const msgs = await pool.query(
@@ -1038,7 +967,7 @@ app.get('/api/admin/chat/:userId', authenticate, async (req, res) => {
 });
 
 app.get('/api/admin/online-count', authenticate, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Только для админа' });
   try {
     const count = await pool.query('SELECT COUNT(*) FROM couriers WHERE is_online = true');
     res.json({ online: parseInt(count.rows[0].count) });
@@ -1048,7 +977,7 @@ app.get('/api/admin/online-count', authenticate, async (req, res) => {
 });
 
 app.get('/api/admin/applications', authenticate, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Только для админа' });
   try {
     const result = await pool.query(
       `SELECT id, name, phone, email, address,
@@ -1071,7 +1000,7 @@ app.get('/api/admin/applications', authenticate, async (req, res) => {
 });
 
 app.post('/api/admin/applications/:id/approve', authenticate, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Только для админа' });
   const { id } = req.params;
   try {
     await pool.query('UPDATE users SET application_status = $1 WHERE id = $2 AND role = $3', ['approved', id, 'courier']);
@@ -1087,7 +1016,7 @@ app.post('/api/admin/applications/:id/approve', authenticate, async (req, res) =
 });
 
 app.post('/api/admin/applications/:id/reject', authenticate, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Только для админа' });
   const { id } = req.params;
   const { reason } = req.body;
   try {
@@ -1099,27 +1028,6 @@ app.post('/api/admin/applications/:id/reject', authenticate, async (req, res) =>
   } catch (err) {
     console.error('Ошибка отклонения заявки:', err);
     res.status(500).json({ error: 'Ошибка сервера' });
-  }
-});
-
-app.post('/api/reviews', authenticate, async (req, res) => {
-  const { order_id, rating, comment } = req.body;
-  if (!order_id || !rating) return res.status(400).json({ error: 'Нужен order_id и rating' });
-  try {
-    // Проверяем, что заказ доставлен и принадлежит клиенту
-    const order = await pool.query('SELECT * FROM orders WHERE id = $1 AND client_id = $2 AND status = $3', [order_id, req.user.id, 'delivered']);
-    if (order.rows.length === 0) return res.status(400).json({ error: 'Нельзя оставить отзыв' });
-    // Проверяем, нет ли уже отзыва
-    const exist = await pool.query('SELECT id FROM reviews WHERE order_id = $1 AND user_id = $2', [order_id, req.user.id]);
-    if (exist.rows.length > 0) return res.status(400).json({ error: 'Вы уже оставили отзыв' });
-
-    await pool.query(
-      'INSERT INTO reviews (order_id, user_id, courier_id, rating, comment) VALUES ($1,$2,$3,$4,$5)',
-      [order_id, req.user.id, order.rows[0].courier_id, rating, comment || null]
-    );
-    res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
   }
 });
 
@@ -1199,23 +1107,15 @@ app.post('/api/admin/payments/confirm', authenticate, async (req, res) => {
   }
 });
 
-// ==================== АДМИНКА: ТАРИФЫ (расширенные) ====================
+// ==================== АДМИНКА: ТАРИФЫ ====================
 app.get('/api/admin/tariffs', authenticate, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   try {
     const base = await pool.query("SELECT value FROM settings WHERE key='base_price'");
     const perkm = await pool.query("SELECT value FROM settings WHERE key='price_per_km'");
-    const shopBase = await pool.query("SELECT value FROM settings WHERE key='shop_base_price'");
-    const shopPerKm = await pool.query("SELECT value FROM settings WHERE key='shop_price_per_km'");
-    const pvzBase = await pool.query("SELECT value FROM settings WHERE key='pvz_base_price'");
-    const pvzPerKm = await pool.query("SELECT value FROM settings WHERE key='pvz_price_per_km'");
     res.json({
       base_price: parseFloat(base.rows[0]?.value || '100'),
-      price_per_km: parseFloat(perkm.rows[0]?.value || '20'),
-      shop_base_price: parseFloat(shopBase.rows[0]?.value || '200'),
-      shop_price_per_km: parseFloat(shopPerKm.rows[0]?.value || '15'),
-      pvz_base_price: parseFloat(pvzBase.rows[0]?.value || '150'),
-      pvz_price_per_km: parseFloat(pvzPerKm.rows[0]?.value || '15')
+      price_per_km: parseFloat(perkm.rows[0]?.value || '20')
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1224,14 +1124,10 @@ app.get('/api/admin/tariffs', authenticate, async (req, res) => {
 
 app.put('/api/admin/tariffs', authenticate, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-  const { base_price, price_per_km, shop_base_price, shop_price_per_km, pvz_base_price, pvz_price_per_km } = req.body;
+  const { base_price, price_per_km } = req.body;
   try {
     await pool.query("UPDATE settings SET value = $1 WHERE key = 'base_price'", [base_price.toString()]);
     await pool.query("UPDATE settings SET value = $1 WHERE key = 'price_per_km'", [price_per_km.toString()]);
-    await pool.query("UPDATE settings SET value = $1 WHERE key = 'shop_base_price'", [shop_base_price?.toString() || '200']);
-    await pool.query("UPDATE settings SET value = $1 WHERE key = 'shop_price_per_km'", [shop_price_per_km?.toString() || '15']);
-    await pool.query("UPDATE settings SET value = $1 WHERE key = 'pvz_base_price'", [pvz_base_price?.toString() || '150']);
-    await pool.query("UPDATE settings SET value = $1 WHERE key = 'pvz_price_per_km'", [pvz_price_per_km?.toString() || '15']);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1265,41 +1161,6 @@ app.put('/api/admin/content', authenticate, async (req, res) => {
   }
 });
 
-// ==================== АДМИНКА: РЕГИОНЫ ====================
-app.get('/api/admin/regions', authenticate, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-  try {
-    const result = await pool.query('SELECT * FROM regions ORDER BY name');
-    res.json(result.rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/admin/regions', authenticate, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-  const { name } = req.body;
-  try {
-    const result = await pool.query('INSERT INTO regions (name) VALUES ($1) RETURNING *', [name]);
-    res.json(result.rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.delete('/api/admin/regions/:id', authenticate, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-  const { id } = req.params;
-  try {
-    await pool.query('DELETE FROM regions WHERE id=$1', [id]);
-    res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// Публичный список регионов
-app.get('/api/regions', authenticate, async (req, res) => {
-  try {
-    const result = await pool.query('SELECT id, name FROM regions ORDER BY name');
-    res.json(result.rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 // ==================== АДМИНКА: ОТЗЫВЫ ====================
 app.get('/api/admin/reviews', authenticate, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
@@ -1322,13 +1183,13 @@ app.delete('/api/admin/reviews/:id', authenticate, async (req, res) => {
   }
 });
 
-// ==================== АДМИНКА: БЛОКИРОВКА ПОЛЬЗОВАТЕЛЕЙ (с причиной) ====================
+// ==================== АДМИНКА: ПОЛЬЗОВАТЕЛИ ====================
 app.put('/api/admin/users/:id/block', authenticate, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   const { id } = req.params;
-  const { blocked, reason } = req.body;
+  const { blocked } = req.body;
   try {
-    await pool.query('UPDATE users SET is_blocked=$1, block_reason=$2 WHERE id=$3', [blocked, reason || null, id]);
+    await pool.query('UPDATE users SET is_blocked=$1 WHERE id=$2', [blocked, id]);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1406,7 +1267,7 @@ app.get('/api/courier/payouts', authenticate, async (req, res) => {
 
 app.get('/api/next-payout', authenticate, async (req, res) => {
   const now = new Date();
-  const days = [2, 4, 6];
+  const days = [2, 4, 6]; // вторник, четверг, суббота
   const hour = 14;
   const minute = 0;
 
@@ -1425,38 +1286,6 @@ app.get('/api/next-payout', authenticate, async (req, res) => {
     }
   }
 });
-
-// ================== ОТЗЫВЫ ==================
-app.post('/api/reviews', authenticate, async (req, res) => {
-  const { order_id, rating, comment } = req.body;
-  if (!order_id || !rating) return res.status(400).json({ error: 'Нужен order_id и rating' });
-  try {
-    // Проверяем, что заказ доставлен и принадлежит клиенту
-    const order = await pool.query(
-      'SELECT * FROM orders WHERE id = $1 AND client_id = $2 AND status = $3',
-      [order_id, req.user.id, 'delivered']
-    );
-    if (order.rows.length === 0) return res.status(400).json({ error: 'Нельзя оставить отзыв' });
-
-    // Проверяем, нет ли уже отзыва
-    const exist = await pool.query(
-      'SELECT id FROM reviews WHERE order_id = $1 AND user_id = $2',
-      [order_id, req.user.id]
-    );
-    if (exist.rows.length > 0) return res.status(400).json({ error: 'Вы уже оставили отзыв' });
-
-    // Сохраняем отзыв
-    await pool.query(
-      'INSERT INTO reviews (order_id, user_id, courier_id, rating, comment) VALUES ($1,$2,$3,$4,$5)',
-      [order_id, req.user.id, order.rows[0].courier_id, rating, comment || null]
-    );
-    res.json({ success: true });
-  } catch (e) {
-    console.error('Ошибка создания отзыва:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
 
 // ================== ЧЕРЕЗ SOCKET.IO ==================
 io.on('connection', (socket) => {
@@ -1479,27 +1308,26 @@ io.on('connection', (socket) => {
 
   socket.on('send_message', async (data) => {
     const senderId = socket.userId;
-    const { order_id, text, image } = data;
-    if (!senderId || !order_id || (!text && !image)) return;
+    const { order_id, text } = data;
+    if (!senderId || !order_id || !text) return;
 
     try {
       const user = await pool.query('SELECT name FROM users WHERE id = $1', [senderId]);
       const senderName = user.rows[0]?.name || 'Неизвестный';
 
       await pool.query(
-        'INSERT INTO messages (order_id, sender_id, text, image) VALUES ($1,$2,$3,$4)',
-        [order_id, senderId, text || null, image || null]
+        'INSERT INTO messages (order_id, sender_id, text) VALUES ($1,$2,$3)',
+        [order_id, senderId, text]
       );
 
       io.to(`order_${order_id}`).emit('new_message', {
         sender_id: senderId,
         sender_name: senderName,
         text,
-        image,
         time: new Date().toISOString()
       });
 
-      // Push второй стороне
+      // Push второй стороне (клиенту или курьеру)
       const order = await pool.query('SELECT client_id, courier_id FROM orders WHERE id = $1', [order_id]);
       if (order.rows.length > 0) {
         const { client_id, courier_id } = order.rows[0];
@@ -1511,7 +1339,7 @@ io.on('connection', (socket) => {
               to: token,
               sound: 'default',
               title: 'Новое сообщение',
-              body: `${senderName}: ${(text || '[фото]').substring(0, 100)}`,
+              body: `${senderName}: ${text.substring(0, 100)}`,
               data: { orderId: order_id },
             })));
           }
@@ -1528,64 +1356,38 @@ io.on('connection', (socket) => {
 
   socket.on('send_support_message', async (data) => {
     const senderId = socket.userId;
-    const { text, image, recipient_id } = data;
-    if (!senderId || (!text && !image)) return;
+    const { text } = data;
+    if (!senderId || !text) return;
 
     try {
       const user = await pool.query('SELECT name FROM users WHERE id = $1', [senderId]);
       const senderName = user.rows[0]?.name || 'Неизвестный';
-      const recId = recipient_id || null;
 
       await pool.query(
-        'INSERT INTO messages (order_id, sender_id, recipient_id, text, image) VALUES (0,$1,$2,$3,$4)',
-        [senderId, recId, text || null, image || null]
+        'INSERT INTO messages (order_id, sender_id, text) VALUES (0, $1, $2)',
+        [senderId, text]
       );
 
-      const msg = {
-        id: Date.now(),
-        order_id: 0,
+      io.to('support').emit('new_support_message', {
         sender_id: senderId,
-        recipient_id: recId,
+        sender_name: senderName,
         text,
-        image,
-        time: new Date().toISOString(),
-        sender_name: senderName
-      };
+        time: new Date().toISOString()
+      });
 
-      if (userRole === 'admin' && recId) {
-        io.to(`user_${recId}`).emit('new_support_message', msg);
-        const admins = await pool.query("SELECT id FROM users WHERE role='admin'");
-        for (const admin of admins.rows) {
-          io.to(`user_${admin.id}`).emit('new_support_message', msg);
-        }
-        // Push пользователю
-        const tokens = await getUserPushTokens(recId);
+      // Push администраторам
+      const admins = await pool.query("SELECT id FROM users WHERE role = 'admin'");
+      for (const admin of admins.rows) {
+        const tokens = await getUserPushTokens(admin.id);
         if (tokens.length) {
-          await sendPushNotifications(tokens.map(t => ({
-            to: t,
+          await sendPushNotifications(tokens.map(token => ({
+            to: token,
             sound: 'default',
-            title: 'Поддержка',
-            body: `${senderName}: ${(text || '[фото]').substring(0, 100)}`,
-            data: {}
+            title: 'Новое сообщение в поддержку',
+            body: `${senderName}: ${text.substring(0, 100)}`,
+            data: { userId: senderId },
           })));
         }
-      } else {
-        const admins = await pool.query("SELECT id FROM users WHERE role='admin'");
-        for (const admin of admins.rows) {
-          io.to(`user_${admin.id}`).emit('new_support_message', msg);
-          // Push админам
-          const tokens = await getUserPushTokens(admin.id);
-          if (tokens.length) {
-            await sendPushNotifications(tokens.map(t => ({
-              to: t,
-              sound: 'default',
-              title: 'Новое сообщение в поддержку',
-              body: `${senderName}: ${(text || '[фото]').substring(0, 100)}`,
-              data: {}
-            })));
-          }
-        }
-        socket.emit('new_support_message', msg);
       }
     } catch (err) {
       console.error('Ошибка отправки сообщения в поддержку:', err);
@@ -1763,11 +1565,31 @@ async function processAutoPayouts() {
   }
 }
 
+// Запуск каждый вторник, четверг, субботу в 14:00 по Москве (11:00 UTC)
 cron.schedule('0 11 * * 2,4,6', () => {
   console.log('Запуск автоматических выплат по расписанию');
   processAutoPayouts();
 }, {
   timezone: "Europe/Moscow"
+});
+
+// Тестовый push для админа
+app.get('/api/admin/test-push-all', authenticate, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  const result = await pool.query("SELECT token FROM push_tokens");
+  const tokens = result.rows.map(r => r.token);
+  if (!tokens.length) return res.json({ error: 'Нет push-токенов в базе' });
+  try {
+    await sendPushNotifications(tokens.map(t => ({
+      to: t,
+      sound: 'default',
+      title: 'Тест',
+      body: 'Если видите это — push работает!'
+    })));
+    res.json({ success: true, sent: tokens.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ================== АВТОМАТИЧЕСКАЯ МИГРАЦИЯ ПРИ СТАРТЕ ==================
@@ -1828,7 +1650,6 @@ async function runMigrations() {
           ALTER TABLE users ADD COLUMN IF NOT EXISTS accepted_agreement BOOLEAN DEFAULT false;
           ALTER TABLE users ADD COLUMN IF NOT EXISTS agreed_at TIMESTAMPTZ;
           ALTER TABLE users ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
-          ALTER TABLE users ADD COLUMN IF NOT EXISTS block_reason TEXT;
         `);
         console.log('Поля для заявок курьеров готовы');
       } catch (e) {
@@ -1859,10 +1680,7 @@ async function runMigrations() {
       console.error('Ошибка добавления finished_at:', e.message);
     }
 
-    // Новые поля для ПВЗ
-    await client.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS pvz_code_image TEXT;`);
-    await client.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS pvz_address TEXT;`);
-
+    // Новые поля и таблицы для продуктовых заказов
     await client.query(`
       CREATE TABLE IF NOT EXISTS order_items (
         id SERIAL PRIMARY KEY,
@@ -1890,24 +1708,10 @@ async function runMigrations() {
       );
       INSERT INTO settings (key, value) VALUES ('base_price', '100') ON CONFLICT (key) DO NOTHING;
       INSERT INTO settings (key, value) VALUES ('price_per_km', '20') ON CONFLICT (key) DO NOTHING;
-      INSERT INTO settings (key, value) VALUES ('shop_base_price', '200') ON CONFLICT (key) DO NOTHING;
-      INSERT INTO settings (key, value) VALUES ('shop_price_per_km', '15') ON CONFLICT (key) DO NOTHING;
-      INSERT INTO settings (key, value) VALUES ('pvz_base_price', '150') ON CONFLICT (key) DO NOTHING;
-      INSERT INTO settings (key, value) VALUES ('pvz_price_per_km', '15') ON CONFLICT (key) DO NOTHING;
       INSERT INTO settings (key, value) VALUES ('privacy_policy', '') ON CONFLICT (key) DO NOTHING;
       INSERT INTO settings (key, value) VALUES ('public_offer', '') ON CONFLICT (key) DO NOTHING;
       INSERT INTO settings (key, value) VALUES ('agent_agreement', '') ON CONFLICT (key) DO NOTHING;
     `);
-
-    // Таблица регионов
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS regions (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL UNIQUE
-      );
-      INSERT INTO regions (name) VALUES ('Санкт-Петербург') ON CONFLICT (name) DO NOTHING;
-    `);
-    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS region_id INTEGER REFERENCES regions(id);`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS reviews (
@@ -1934,7 +1738,6 @@ async function runMigrations() {
 
     await client.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT false;
-      ALTER TABLE users ADD COLUMN IF NOT EXISTS block_reason TEXT;
     `);
 
     await client.query(`
@@ -1954,6 +1757,7 @@ async function runMigrations() {
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_passport TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_face TEXT;`);
 
+    // Таблица push-токенов
     await client.query(`
       CREATE TABLE IF NOT EXISTS push_tokens (
         id SERIAL PRIMARY KEY,
