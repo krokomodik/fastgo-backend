@@ -1464,6 +1464,10 @@ io.on('connection', (socket) => {
     socket.join(`order_${orderId}`);
   });
 
+  socket.on('join_user_room', (userId) => {
+  socket.join(`user_${userId}`);
+});
+
   socket.on('send_message', async (data) => {
     const senderId = socket.userId;
     const { order_id, text, image } = data;
