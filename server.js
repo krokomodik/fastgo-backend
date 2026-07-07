@@ -325,19 +325,20 @@ app.get('/api/orders', authenticate, async (req, res) => {
       orders = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
     } else if (req.user.role === 'client') {
   orders = await pool.query(
-    `SELECT o.*,
-            u.name AS courier_name,
-            u.photo_face AS courier_photo,
-            COALESCE(
-              (SELECT ROUND(AVG(rating)::numeric, 1) FROM reviews WHERE courier_id = o.courier_id),
-              0
-            ) AS courier_rating
-     FROM orders o
-     LEFT JOIN users u ON u.id = o.courier_id
-     WHERE o.client_id = $1
-     ORDER BY o.created_at DESC`,
-    [req.user.id]
-  );
+  `SELECT o.*,
+          u.name AS courier_name,
+          u.photo_face AS courier_photo,
+          COALESCE(
+            (SELECT ROUND(AVG(rating)::numeric, 1) FROM reviews WHERE courier_id = o.courier_id),
+            0
+          ) AS courier_rating,
+          (SELECT COUNT(*) FROM reviews WHERE order_id = o.id AND user_id = o.client_id) > 0 AS has_review
+   FROM orders o
+   LEFT JOIN users u ON u.id = o.courier_id
+   WHERE o.client_id = $1
+   ORDER BY o.created_at DESC`,
+  [req.user.id]
+);
 }
     res.json(orders.rows);
   } catch (err) {
