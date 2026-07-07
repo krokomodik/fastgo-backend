@@ -647,6 +647,9 @@ app.get('/api/orders/:id/messages', authenticate, async (req, res) => {
 
 // Сообщения поддержки (персональные)
 app.get('/api/orders/0/messages', authenticate, async (req, res) => {
+  if (!req.user || !req.user.id) {
+    return res.status(401).json({ error: 'Пользователь не определён' });
+  }
   try {
     const msgs = await pool.query(
       `SELECT m.id, m.order_id, m.sender_id, m.recipient_id, m.text, m.image,
