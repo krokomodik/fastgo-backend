@@ -317,29 +317,39 @@ app.post('/api/order/create', authenticate, async (req, res) => {
   }
 });
 
-// Получить все заказы (фильтр для курьера: убрано ограничение по времени для истории)
+// Получить все заказы (фильтр для курьера: история не исчезает, для клиента – рейтинг курьера и отзыв)
 app.get('/api/orders', authenticate, async (req, res) => {
   try {
     let orders;
     if (req.user.role === 'admin') {
       orders = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
     } else if (req.user.role === 'client') {
-  orders = await pool.query(
-  `SELECT o.*,
-          u.name AS courier_name,
-          u.photo_face AS courier_photo,
-          COALESCE(
-            (SELECT ROUND(AVG(rating)::numeric, 1) FROM reviews WHERE courier_id = o.courier_id),
-            0
-          ) AS courier_rating,
-          (SELECT COUNT(*) FROM reviews WHERE order_id = o.id AND user_id = o.client_id) > 0 AS has_review
-   FROM orders o
-   LEFT JOIN users u ON u.id = o.courier_id
-   WHERE o.client_id = $1
-   ORDER BY o.created_at DESC`,
-  [req.user.id]
-);
-}
+      orders = await pool.query(
+        `SELECT o.*,
+                u.name AS courier_name,
+                u.photo_face AS courier_photo,
+                COALESCE(
+                  (SELECT ROUND(AVG(rating)::numeric, 1) FROM reviews WHERE courier_id = o.courier_id),
+                  0
+                ) AS courier_rating,
+                (SELECT COUNT(*) FROM reviews WHERE order_id = o.id AND user_id = o.client_id) > 0 AS has_review
+         FROM orders o
+         LEFT JOIN users u ON u.id = o.courier_id
+         WHERE o.client_id = $1
+         ORDER BY o.created_at DESC`,
+        [req.user.id]
+      );
+    } else if (req.user.role === 'courier') {
+      orders = await pool.query(
+        `SELECT o.*, 
+           (SELECT json_agg(json_build_object('name', oi.name, 'note', oi.note) ORDER BY oi.sort_order)
+            FROM order_items oi WHERE oi.order_id = o.id) AS items
+         FROM orders o
+         WHERE (o.courier_id=$1 OR o.status='paid')
+         ORDER BY o.created_at DESC`,
+        [req.user.id]
+      );
+    }
     res.json(orders.rows);
   } catch (err) {
     console.error('Ошибка получения заказов:', err);
@@ -1103,27 +1113,6 @@ app.post('/api/admin/applications/:id/reject', authenticate, async (req, res) =>
   }
 });
 
-app.post('/api/reviews', authenticate, async (req, res) => {
-  const { order_id, rating, comment } = req.body;
-  if (!order_id || !rating) return res.status(400).json({ error: 'Нужен order_id и rating' });
-  try {
-    // Проверяем, что заказ доставлен и принадлежит клиенту
-    const order = await pool.query('SELECT * FROM orders WHERE id = $1 AND client_id = $2 AND status = $3', [order_id, req.user.id, 'delivered']);
-    if (order.rows.length === 0) return res.status(400).json({ error: 'Нельзя оставить отзыв' });
-    // Проверяем, нет ли уже отзыва
-    const exist = await pool.query('SELECT id FROM reviews WHERE order_id = $1 AND user_id = $2', [order_id, req.user.id]);
-    if (exist.rows.length > 0) return res.status(400).json({ error: 'Вы уже оставили отзыв' });
-
-    await pool.query(
-      'INSERT INTO reviews (order_id, user_id, courier_id, rating, comment) VALUES ($1,$2,$3,$4,$5)',
-      [order_id, req.user.id, order.rows[0].courier_id, rating, comment || null]
-    );
-    res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
 // ==================== АДМИНКА: ЗАКАЗЫ ====================
 app.get('/api/admin/orders', authenticate, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
@@ -1432,21 +1421,18 @@ app.post('/api/reviews', authenticate, async (req, res) => {
   const { order_id, rating, comment } = req.body;
   if (!order_id || !rating) return res.status(400).json({ error: 'Нужен order_id и rating' });
   try {
-    // Проверяем, что заказ доставлен и принадлежит клиенту
     const order = await pool.query(
       'SELECT * FROM orders WHERE id = $1 AND client_id = $2 AND status = $3',
       [order_id, req.user.id, 'delivered']
     );
     if (order.rows.length === 0) return res.status(400).json({ error: 'Нельзя оставить отзыв' });
 
-    // Проверяем, нет ли уже отзыва
     const exist = await pool.query(
       'SELECT id FROM reviews WHERE order_id = $1 AND user_id = $2',
       [order_id, req.user.id]
     );
     if (exist.rows.length > 0) return res.status(400).json({ error: 'Вы уже оставили отзыв' });
 
-    // Сохраняем отзыв
     await pool.query(
       'INSERT INTO reviews (order_id, user_id, courier_id, rating, comment) VALUES ($1,$2,$3,$4,$5)',
       [order_id, req.user.id, order.rows[0].courier_id, rating, comment || null]
@@ -1553,7 +1539,7 @@ io.on('connection', (socket) => {
         sender_name: senderName
       };
 
-      if (userRole === 'admin' && recId) {
+      if (socket.userRole === 'admin' && recId) {
         io.to(`user_${recId}`).emit('new_support_message', msg);
         const admins = await pool.query("SELECT id FROM users WHERE role='admin'");
         for (const admin of admins.rows) {
@@ -1954,6 +1940,10 @@ async function runMigrations() {
 
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_passport TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_face TEXT;`);
+
+    // Добавляем поля для чата (recipient_id и image в messages)
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS recipient_id INTEGER REFERENCES users(id);`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS image TEXT;`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS push_tokens (
