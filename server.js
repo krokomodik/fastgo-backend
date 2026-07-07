@@ -645,6 +645,25 @@ app.get('/api/orders/:id/messages', authenticate, async (req, res) => {
   }
 });
 
+// Сообщения поддержки (персональные)
+app.get('/api/orders/0/messages', authenticate, async (req, res) => {
+  try {
+    const msgs = await pool.query(
+      `SELECT m.id, m.order_id, m.sender_id, m.recipient_id, m.text, m.image,
+              m.created_at as time, u.name as sender_name
+       FROM messages m
+       JOIN users u ON u.id = m.sender_id
+       WHERE m.order_id = 0 AND (m.sender_id = $1 OR m.recipient_id = $1)
+       ORDER BY m.created_at ASC`,
+      [req.user.id]
+    );
+    res.json(msgs.rows);
+  } catch (err) {
+    console.error('Ошибка загрузки сообщений поддержки:', err);
+    res.status(500).json({ error: 'Ошибка загрузки сообщений' });
+  }
+});
+
 // ================== ПОДСКАЗКИ DADATA (с учётом региона) ==================
 const fetch = require('node-fetch');
 const DADATA_KEY = '8ec245ded8a5eb0c76913ecebbe0699c56545de5';
@@ -1464,6 +1483,10 @@ io.on('connection', (socket) => {
     socket.join(`order_${orderId}`);
   });
 
+    socket.on('join_user_room', (userId) => {
+    socket.join(`user_${userId}`);
+  });
+
   socket.on('join_user_room', (userId) => {
   socket.join(`user_${userId}`);
 });
@@ -1517,7 +1540,7 @@ io.on('connection', (socket) => {
     socket.join('support');
   });
 
-  socket.on('send_support_message', async (data) => {
+    socket.on('send_support_message', async (data) => {
     const senderId = socket.userId;
     const { text, image, recipient_id } = data;
     if (!senderId || (!text && !image)) return;
@@ -1525,7 +1548,8 @@ io.on('connection', (socket) => {
     try {
       const user = await pool.query('SELECT name FROM users WHERE id = $1', [senderId]);
       const senderName = user.rows[0]?.name || 'Неизвестный';
-      const recId = recipient_id || null;
+      // Если отправитель не админ, получателем становится админ
+      const recId = socket.userRole === 'admin' ? (recipient_id || null) : null;
 
       await pool.query(
         'INSERT INTO messages (order_id, sender_id, recipient_id, text, image) VALUES (0,$1,$2,$3,$4)',
@@ -1544,6 +1568,7 @@ io.on('connection', (socket) => {
       };
 
       if (socket.userRole === 'admin' && recId) {
+        // Админ ответил конкретному пользователю – отправляем в его комнату и всем админам
         io.to(`user_${recId}`).emit('new_support_message', msg);
         const admins = await pool.query("SELECT id FROM users WHERE role='admin'");
         for (const admin of admins.rows) {
@@ -1561,10 +1586,14 @@ io.on('connection', (socket) => {
           })));
         }
       } else {
+        // Клиент или курьер пишет в поддержку – отправляем всем админам и ему самому
         const admins = await pool.query("SELECT id FROM users WHERE role='admin'");
         for (const admin of admins.rows) {
           io.to(`user_${admin.id}`).emit('new_support_message', msg);
-          // Push админам
+        }
+        socket.emit('new_support_message', msg); // чтобы отправитель сразу увидел своё сообщение
+        // Push админам
+        for (const admin of admins.rows) {
           const tokens = await getUserPushTokens(admin.id);
           if (tokens.length) {
             await sendPushNotifications(tokens.map(t => ({
@@ -1572,17 +1601,15 @@ io.on('connection', (socket) => {
               sound: 'default',
               title: 'Новое сообщение в поддержку',
               body: `${senderName}: ${(text || '[фото]').substring(0, 100)}`,
-              data: {}
+              data: { userId: senderId }
             })));
           }
         }
-        socket.emit('new_support_message', msg);
       }
     } catch (err) {
       console.error('Ошибка отправки сообщения в поддержку:', err);
     }
   });
-});
 
 // Просмотр push-токенов (только для админа)
 app.get('/api/admin/push-tokens', authenticate, async (req, res) => {
