@@ -1463,7 +1463,6 @@ app.post('/api/reviews', authenticate, async (req, res) => {
   }
 });
 
-
 // ================== ЧЕРЕЗ SOCKET.IO ==================
 io.on('connection', (socket) => {
   // логирование отключено
@@ -1483,13 +1482,9 @@ io.on('connection', (socket) => {
     socket.join(`order_${orderId}`);
   });
 
-    socket.on('join_user_room', (userId) => {
+  socket.on('join_user_room', (userId) => {
     socket.join(`user_${userId}`);
   });
-
-  socket.on('join_user_room', (userId) => {
-  socket.join(`user_${userId}`);
-});
 
   socket.on('send_message', async (data) => {
     const senderId = socket.userId;
@@ -1540,7 +1535,7 @@ io.on('connection', (socket) => {
     socket.join('support');
   });
 
-    socket.on('send_support_message', async (data) => {
+  socket.on('send_support_message', async (data) => {
     const senderId = socket.userId;
     const { text, image, recipient_id } = data;
     if (!senderId || (!text && !image)) return;
@@ -1610,6 +1605,7 @@ io.on('connection', (socket) => {
       console.error('Ошибка отправки сообщения в поддержку:', err);
     }
   });
+});
 
 // Просмотр push-токенов (только для админа)
 app.get('/api/admin/push-tokens', authenticate, async (req, res) => {
