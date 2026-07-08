@@ -1305,7 +1305,7 @@ app.delete('/api/admin/regions/:id', authenticate, async (req, res) => {
 });
 
 // Публичный список регионов
-app.get('/api/regions', authenticate, async (req, res) => {
+app.get('/api/regions', async (req, res) => {
   try {
     const result = await pool.query('SELECT id, name FROM regions ORDER BY name');
     res.json(result.rows);
