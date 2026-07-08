@@ -1475,7 +1475,7 @@ const transporter = nodemailer.createTransport({
   secure: true, // использовать SSL
   auth: {
     user: 'dokuda.dostavka@gmail.com',
-    pass: 'ymknqnrx towomkvd'   // → пиши без пробелов: ymknqnrx towomkvd // пароль приложения (без пробелов)
+    pass: 'ymknqnrxtowomkvd'   // → пиши без пробелов: ymknqnrx towomkvd // пароль приложения (без пробелов)
   }
 });
 
