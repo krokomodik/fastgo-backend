@@ -1466,6 +1466,77 @@ app.post('/api/reviews', authenticate, async (req, res) => {
   }
 });
 
+// ================== ВЕРИФИКАЦИЯ EMAIL ==================
+const nodemailer = require('nodemailer');
+
+// Настройки почтового ящика
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: 'dokuda.dostavka@gmail.com',
+    pass: 'ggzgwkjdephhlcet'   // пароль приложения (без пробелов)
+  }
+});
+
+// Отправить код верификации на email
+app.post('/api/send-verification-code', authenticate, async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email обязателен' });
+
+  try {
+    // Генерируем 4-значный код
+    const code = Math.floor(1000 + Math.random() * 9000).toString();
+
+    // Сохраняем код в базе
+    await pool.query(
+      'UPDATE users SET verification_code = $1 WHERE id = $2',
+      [code, req.user.id]
+    );
+
+    // Отправляем письмо
+    await transporter.sendMail({
+      from: '"Докуда" <dokuda.dostavka@gmail.com>',
+      to: email,
+      subject: 'Код подтверждения регистрации',
+      text: `Ваш код подтверждения: ${code}`,
+      html: `<p>Ваш код подтверждения: <strong>${code}</strong></p>`
+    });
+
+    res.json({ success: true, message: 'Код отправлен' });
+  } catch (e) {
+    console.error('Ошибка отправки кода:', e);
+    res.status(500).json({ error: 'Не удалось отправить код' });
+  }
+});
+
+// Проверить код и активировать email
+app.post('/api/verify-email', authenticate, async (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: 'Код обязателен' });
+
+  try {
+    const user = await pool.query(
+      'SELECT * FROM users WHERE id = $1 AND verification_code = $2',
+      [req.user.id, code]
+    );
+
+    if (user.rows.length === 0) {
+      return res.status(400).json({ error: 'Неверный код' });
+    }
+
+    // Активируем email и удаляем код
+    await pool.query(
+      'UPDATE users SET email_verified = true, verification_code = NULL WHERE id = $1',
+      [req.user.id]
+    );
+
+    res.json({ success: true, message: 'Email подтверждён' });
+  } catch (e) {
+    console.error('Ошибка проверки кода:', e);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
 // ================== ЧЕРЕЗ SOCKET.IO ==================
 io.on('connection', (socket) => {
   // логирование отключено
@@ -1974,6 +2045,10 @@ async function runMigrations() {
     // Добавляем поля для чата (recipient_id и image в messages)
     await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS recipient_id INTEGER REFERENCES users(id);`);
     await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS image TEXT;`);
+
+    // Поля для верификации email
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_code TEXT;`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT false;`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS push_tokens (
