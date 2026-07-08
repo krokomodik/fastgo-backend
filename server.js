@@ -1466,35 +1466,26 @@ app.post('/api/reviews', authenticate, async (req, res) => {
   }
 });
 
-// ================== ВЕРИФИКАЦИЯ EMAIL ==================
-const nodemailer = require('nodemailer');
+// ================== ВЕРИФИКАЦИЯ EMAIL (код) ==================
+const crypto = require('crypto');
 
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
-  secure: false, // использовать STARTTLS
-  auth: {
-    user: 'dokuda.dostavka@gmail.com',
-    pass: 'rolkukyccflicfnj'  // пароль приложения без пробелов
-  },
-  tls: {
-    rejectUnauthorized: false // временно, на случай проблем с сертификатом
-  }
-});
-
-// Отправить код верификации на email
+// Отправить код подтверждения
 app.post('/api/send-verification-code', authenticate, async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: 'Email обязателен' });
 
   try {
+    // Генерируем 4-значный код
     const code = Math.floor(1000 + Math.random() * 9000).toString();
 
+    // Сохраняем код и время создания (для TTL)
     await pool.query(
-      'UPDATE users SET verification_code = $1 WHERE id = $2',
+      'UPDATE users SET verification_code = $1, verification_code_created_at = NOW() WHERE id = $2',
       [code, req.user.id]
     );
 
+    // Отправляем письмо через Firebase Auth (кастомный SMTP) или nodemailer
+    // Здесь используем тот же transporter, который вы уже настроили
     await transporter.sendMail({
       from: '"Докуда" <dokuda.dostavka@gmail.com>',
       to: email,
@@ -1503,11 +1494,51 @@ app.post('/api/send-verification-code', authenticate, async (req, res) => {
       html: `<p>Ваш код подтверждения: <strong>${code}</strong></p>`
     });
 
-    console.log(`Код подтверждения отправлен на ${email}: ${code}`);
     res.json({ success: true, message: 'Код отправлен' });
   } catch (e) {
     console.error('Ошибка отправки кода:', e);
     res.status(500).json({ error: 'Не удалось отправить код' });
+  }
+});
+
+// Проверить код и активировать email
+app.post('/api/verify-email-code', authenticate, async (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: 'Код обязателен' });
+
+  try {
+    const user = await pool.query(
+      'SELECT * FROM users WHERE id = $1 AND verification_code = $2',
+      [req.user.id, code]
+    );
+
+    if (user.rows.length === 0) {
+      return res.status(400).json({ error: 'Неверный код' });
+    }
+
+    // Проверяем TTL (5 минут)
+    const createdAt = new Date(user.rows[0].verification_code_created_at);
+    if (Date.now() - createdAt.getTime() > 5 * 60 * 1000) {
+      return res.status(400).json({ error: 'Код истёк' });
+    }
+
+    // Активируем email и удаляем код
+    await pool.query(
+      'UPDATE users SET email_verified = true, verification_code = NULL WHERE id = $1',
+      [req.user.id]
+    );
+
+    // Генерируем JWT токен, чтобы сразу авторизовать пользователя
+    const token = jwt.sign(
+      { id: req.user.id, email: req.user.email, role: req.user.role },
+      JWT_SECRET,
+      { expiresIn: '365d' }
+    );
+
+    res.json({ success: true, message: 'Email подтверждён', token });
+  } catch (e) {
+    console.error('Ошибка проверки кода:', e);
+    res.status(500).json({ error: 'Ошибка сервера' });
   }
 });
 
@@ -2016,13 +2047,14 @@ async function runMigrations() {
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_passport TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_face TEXT;`);
 
-    // Добавляем поля для чата (recipient_id и image в messages)
-    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS recipient_id INTEGER REFERENCES users(id);`);
-    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS image TEXT;`);
-
     // Поля для верификации email
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_code TEXT;`);
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT false;`);
+    await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_code_created_at TIMESTAMPTZ;`);
+
+    // Поля для чата (recipient_id и image в messages)
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS recipient_id INTEGER REFERENCES users(id);`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS image TEXT;`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS push_tokens (
