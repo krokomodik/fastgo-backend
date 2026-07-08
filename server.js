@@ -1467,7 +1467,6 @@ app.post('/api/reviews', authenticate, async (req, res) => {
 });
 
 // ================== ВЕРИФИКАЦИЯ EMAIL (код) ==================
-const crypto = require('crypto');
 
 // Отправить код подтверждения
 app.post('/api/send-verification-code', authenticate, async (req, res) => {
