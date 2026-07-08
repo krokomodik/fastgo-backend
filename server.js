@@ -1478,7 +1478,7 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// Отправить код верификации на email
+// Отправить код верификации на email (временная версия – код возвращается в ответе)
 app.post('/api/send-verification-code', authenticate, async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: 'Email обязателен' });
@@ -1493,16 +1493,15 @@ app.post('/api/send-verification-code', authenticate, async (req, res) => {
       [code, req.user.id]
     );
 
-    // Отправляем письмо
-    await transporter.sendMail({
-      from: '"Докуда" <dokuda.dostavka@gmail.com>',
-      to: email,
-      subject: 'Код подтверждения регистрации',
-      text: `Ваш код подтверждения: ${code}`,
-      html: `<p>Ваш код подтверждения: <strong>${code}</strong></p>`
-    });
+    // Логируем код (можно будет посмотреть в Amvera)
+    console.log(`Код подтверждения для ${email}: ${code}`);
 
-    res.json({ success: true, message: 'Код отправлен' });
+    // Возвращаем код в ответе (ВРЕМЕННО)
+    res.json({
+      success: true,
+      message: 'Код отправлен',
+      code: code   // ← временное поле для теста
+    });
   } catch (e) {
     console.error('Ошибка отправки кода:', e);
     res.status(500).json({ error: 'Не удалось отправить код' });
