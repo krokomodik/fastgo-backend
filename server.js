@@ -1471,11 +1471,14 @@ const nodemailer = require('nodemailer');
 
 const transporter = nodemailer.createTransport({
   host: 'smtp.gmail.com',
-  port: 465,
-  secure: true, // использовать SSL
+  port: 587,
+  secure: false, // использовать STARTTLS
   auth: {
     user: 'dokuda.dostavka@gmail.com',
-    pass: 'ymknqnrtowomkvd'   // → пиши без пробелов: ymknqnrx towomkvd // пароль приложения (без пробелов)
+    pass: 'ymknqnrtowomkvd'   // пароль приложения без пробелов
+  },
+  tls: {
+    rejectUnauthorized: false // временно, на случай проблем с сертификатом
   }
 });
 
