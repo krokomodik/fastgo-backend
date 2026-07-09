@@ -1947,6 +1947,11 @@ async function runMigrations() {
         ON CONFLICT (id) DO NOTHING;
       `);
       console.log('Заказ id=0 готов');
+            await client.query(`
+        INSERT INTO orders (id, client_id, pickup_address, delivery_address, description, price, status)
+        VALUES (-1, 1, 'feedback', 'feedback', 'Чат обратной связи', 0, 'feedback')
+        ON CONFLICT (id) DO NOTHING;
+      `);
 
       try {
         await client.query(`
