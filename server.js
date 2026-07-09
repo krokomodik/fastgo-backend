@@ -250,10 +250,13 @@ app.post('/api/push-token', authenticate, async (req, res) => {
   const { token } = req.body;
   if (!token) return res.status(400).json({ error: 'token обязателен' });
   try {
-    await pool.query(
-      'INSERT INTO push_tokens (user_id, token) VALUES ($1, $2) ON CONFLICT (token) DO NOTHING',
-      [req.user.id, token]
-    );
+    // Удаляем все старые токены этого пользователя
+await pool.query('DELETE FROM push_tokens WHERE user_id = $1', [req.user.id]);
+// Вставляем новый токен
+await pool.query(
+  'INSERT INTO push_tokens (user_id, token) VALUES ($1, $2)',
+  [req.user.id, token]
+);
     res.json({ success: true });
   } catch (e) {
     console.error('Ошибка сохранения push-токена:', e);
@@ -645,25 +648,42 @@ app.get('/api/orders/:id/messages', authenticate, async (req, res) => {
   }
 });
 
-// Сообщения поддержки (персональные)
-app.get('/api/orders/0/messages', authenticate, async (req, res) => {
-  if (!req.user || !req.user.id) {
-    return res.status(401).json({ error: 'Пользователь не определён' });
-  }
-  try {
-    const msgs = await pool.query(
-      `SELECT m.id, m.order_id, m.sender_id, m.recipient_id, m.text, m.image,
-              m.created_at as time, u.name as sender_name
-       FROM messages m
-       JOIN users u ON u.id = m.sender_id
-       WHERE m.order_id = 0 AND (m.sender_id = $1 OR m.recipient_id = $1)
-       ORDER BY m.created_at ASC`,
-      [req.user.id]
-    );
-    res.json(msgs.rows);
-  } catch (err) {
-    console.error('Ошибка загрузки сообщений поддержки:', err);
-    res.status(500).json({ error: 'Ошибка загрузки сообщений' });
+// Сообщения поддержки и обратной связи (order_id = 0 или -1)
+app.get('/api/orders/:id/messages', authenticate, async (req, res) => {
+  const orderId = req.params.id;
+  // Для специальных чатов (id = 0 или -1) отдаём сообщения, фильтруя по пользователю
+  if (orderId === '0' || orderId === '-1') {
+    try {
+      const msgs = await pool.query(
+        `SELECT m.id, m.order_id, m.sender_id, m.recipient_id, m.text, m.image,
+                m.created_at as time, u.name as sender_name
+         FROM messages m
+         JOIN users u ON u.id = m.sender_id
+         WHERE m.order_id = $1 AND (m.sender_id = $2 OR m.recipient_id = $2)
+         ORDER BY m.created_at ASC`,
+        [parseInt(orderId), req.user.id]
+      );
+      res.json(msgs.rows);
+    } catch (err) {
+      console.error('Ошибка загрузки сообщений поддержки:', err);
+      res.status(500).json({ error: 'Ошибка загрузки сообщений' });
+    }
+  } else {
+    // Для обычных заказов оставляем существующую логику (уже есть выше, но если нет – продублируем)
+    try {
+      const msgs = await pool.query(
+        `SELECT m.*, u.name as sender_name
+         FROM messages m
+         JOIN users u ON u.id = m.sender_id
+         WHERE m.order_id = $1
+         ORDER BY m.created_at ASC`,
+        [orderId]
+      );
+      res.json(msgs.rows);
+    } catch (err) {
+      console.error('Ошибка загрузки сообщений:', err);
+      res.status(500).json({ error: 'Ошибка загрузки сообщений' });
+    }
   }
 });
 
@@ -1564,7 +1584,7 @@ io.on('connection', (socket) => {
     socket.join(`user_${userId}`);
   });
 
-  socket.on('send_message', async (data) => {
+    socket.on('send_message', async (data) => {
     const senderId = socket.userId;
     const { order_id, text, image } = data;
     if (!senderId || !order_id || (!text && !image)) return;
@@ -1573,18 +1593,22 @@ io.on('connection', (socket) => {
       const user = await pool.query('SELECT name FROM users WHERE id = $1', [senderId]);
       const senderName = user.rows[0]?.name || 'Неизвестный';
 
-      await pool.query(
-        'INSERT INTO messages (order_id, sender_id, text, image) VALUES ($1,$2,$3,$4)',
+      const result = await pool.query(
+        'INSERT INTO messages (order_id, sender_id, text, image) VALUES ($1,$2,$3,$4) RETURNING id, created_at',
         [order_id, senderId, text || null, image || null]
       );
+      const newMsg = result.rows[0];
 
-      io.to(`order_${order_id}`).emit('new_message', {
+      const msgToEmit = {
+        id: newMsg.id,
         sender_id: senderId,
         sender_name: senderName,
         text,
         image,
-        time: new Date().toISOString()
-      });
+        time: newMsg.created_at.toISOString()
+      };
+
+      io.to(`order_${order_id}`).emit('new_message', msgToEmit);
 
       // Push второй стороне
       const order = await pool.query('SELECT client_id, courier_id FROM orders WHERE id = $1', [order_id]);
@@ -1599,7 +1623,7 @@ io.on('connection', (socket) => {
               sound: 'default',
               title: 'Новое сообщение',
               body: `${senderName}: ${(text || '[фото]').substring(0, 100)}`,
-              data: { orderId: order_id },
+              data: { orderId: order_id, type: 'chat' },
             })));
           }
         }
@@ -1609,39 +1633,42 @@ io.on('connection', (socket) => {
     }
   });
 
+
   socket.on('join_support', () => {
     socket.join('support');
   });
 
-  socket.on('send_support_message', async (data) => {
+    socket.on('send_support_message', async (data) => {
     const senderId = socket.userId;
-    const { text, image, recipient_id } = data;
+    const { text, image, recipient_id, order_id } = data;  // order_id теперь приходит от клиента
+    const effectiveOrderId = order_id !== undefined ? order_id : 0; // по умолчанию 0
     if (!senderId || (!text && !image)) return;
 
     try {
       const user = await pool.query('SELECT name FROM users WHERE id = $1', [senderId]);
       const senderName = user.rows[0]?.name || 'Неизвестный';
-      // Если отправитель не админ, получателем становится админ
+      // Если отправитель не админ, получателем становится админ (recipient_id = null)
       const recId = socket.userRole === 'admin' ? (recipient_id || null) : null;
 
-      await pool.query(
-        'INSERT INTO messages (order_id, sender_id, recipient_id, text, image) VALUES (0,$1,$2,$3,$4)',
-        [senderId, recId, text || null, image || null]
+      const result = await pool.query(
+        'INSERT INTO messages (order_id, sender_id, recipient_id, text, image) VALUES ($1,$2,$3,$4,$5) RETURNING id, created_at',
+        [effectiveOrderId, senderId, recId, text || null, image || null]
       );
+      const newMsg = result.rows[0];
 
       const msg = {
-        id: Date.now(),
-        order_id: 0,
+        id: newMsg.id,
+        order_id: effectiveOrderId,
         sender_id: senderId,
         recipient_id: recId,
         text,
         image,
-        time: new Date().toISOString(),
+        time: newMsg.created_at.toISOString(),
         sender_name: senderName
       };
 
       if (socket.userRole === 'admin' && recId) {
-        // Админ ответил конкретному пользователю – отправляем в его комнату и всем админам
+        // Админ ответил конкретному пользователю
         io.to(`user_${recId}`).emit('new_support_message', msg);
         const admins = await pool.query("SELECT id FROM users WHERE role='admin'");
         for (const admin of admins.rows) {
@@ -1655,7 +1682,7 @@ io.on('connection', (socket) => {
             sound: 'default',
             title: 'Поддержка',
             body: `${senderName}: ${(text || '[фото]').substring(0, 100)}`,
-            data: {}
+            data: { type: 'support' }
           })));
         }
       } else {
@@ -1664,7 +1691,7 @@ io.on('connection', (socket) => {
         for (const admin of admins.rows) {
           io.to(`user_${admin.id}`).emit('new_support_message', msg);
         }
-        socket.emit('new_support_message', msg); // чтобы отправитель сразу увидел своё сообщение
+        socket.emit('new_support_message', msg); // отправитель сразу видит своё сообщение
         // Push админам
         for (const admin of admins.rows) {
           const tokens = await getUserPushTokens(admin.id);
@@ -1674,7 +1701,7 @@ io.on('connection', (socket) => {
               sound: 'default',
               title: 'Новое сообщение в поддержку',
               body: `${senderName}: ${(text || '[фото]').substring(0, 100)}`,
-              data: { userId: senderId }
+              data: { userId: senderId, type: 'support' }
             })));
           }
         }
@@ -1683,7 +1710,6 @@ io.on('connection', (socket) => {
       console.error('Ошибка отправки сообщения в поддержку:', err);
     }
   });
-});
 
 // Просмотр push-токенов (только для админа)
 app.get('/api/admin/push-tokens', authenticate, async (req, res) => {
