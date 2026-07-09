@@ -752,11 +752,11 @@ app.post('/api/calculate-price', authenticate, async (req, res) => {
       return null;
     };
     const [pickup, delivery] = await Promise.all([geocode(pickup_address), geocode(delivery_address)]);
-    if (!pickup || !delivery) return res.json({ price: basePrice * 5, distance: '0.0', fixed: true });
+    if (!pickup || !delivery) return res.status(400).json({ error: 'Не удалось определить координаты адреса. Проверьте правильность адресов.' });
     const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${pickup.lng},${pickup.lat};${delivery.lng},${delivery.lat}?overview=false`;
     const routeResp = await fetch(osrmUrl);
     const routeData = await routeResp.json();
-    if (!routeData.routes || routeData.routes.length === 0) return res.json({ price: basePrice * 5, distance: '0.0', fixed: true });
+    if (!routeData.routes || routeData.routes.length === 0) return res.status(400).json({ error: 'Не удалось построить маршрут. Проверьте адреса.' });
     const distanceKm = routeData.routes[0].distance / 1000;
     const price = Math.round(basePrice + distanceKm * pricePerKm);
     res.json({ price, distance: distanceKm.toFixed(1) });
@@ -795,7 +795,7 @@ app.post('/api/calculate-delivery', authenticate, async (req, res) => {
         return res.json({ price });
       }
     }
-    res.json({ price: basePrice });
+    res.status(400).json({ error: 'Не удалось определить координаты адреса доставки.' });
   } catch (e) {
     console.error('Ошибка расчёта доставки:', e);
     res.json({ price: 250 });
@@ -832,17 +832,17 @@ app.post('/api/calculate-pvz', authenticate, async (req, res) => {
       return null;
     };
     const [pvz, delivery] = await Promise.all([geocode(pvz_address), geocode(delivery_address)]);
-    if (!pvz || !delivery) return res.json({ price: basePrice * 3, distance: '0.0', fixed: true });
+    if (!pvz || !delivery) return res.status(400).json({ error: 'Не удалось определить координаты адреса. Проверьте правильность адресов.' });
     const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${pvz.lng},${pvz.lat};${delivery.lng},${delivery.lat}?overview=false`;
     const routeResp = await fetch(osrmUrl);
     const routeData = await routeResp.json();
-    if (!routeData.routes || routeData.routes.length === 0) return res.json({ price: basePrice * 3, distance: '0.0', fixed: true });
+    if (!routeData.routes || routeData.routes.length === 0) return res.status(400).json({ error: 'Не удалось построить маршрут. Проверьте адреса.' });
     const distanceKm = routeData.routes[0].distance / 1000;
     const price = Math.round(basePrice + distanceKm * pricePerKm);
     res.json({ price, distance: distanceKm.toFixed(1) });
   } catch (e) {
     console.error('Ошибка расчёта ПВЗ:', e);
-    res.json({ price: 300, distance: '0.0', fixed: true });
+    res.status(500).json({ error: 'Сервис расчёта временно недоступен.' });
   }
 });
 
