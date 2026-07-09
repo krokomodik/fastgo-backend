@@ -1711,6 +1711,8 @@ io.on('connection', (socket) => {
     }
   });
 
+});  // <-- Закрытие io.on (добавлено здесь)
+
 // Просмотр push-токенов (только для админа)
 app.get('/api/admin/push-tokens', authenticate, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
