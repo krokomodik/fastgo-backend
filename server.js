@@ -1703,6 +1703,19 @@ app.get('/api/admin/push-tokens', authenticate, async (req, res) => {
   }
 });
 
+// Удаление всех push-токенов конкретного пользователя (только для админа)
+app.delete('/api/admin/push-tokens/:user_id', authenticate, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  const { user_id } = req.params;
+  try {
+    await pool.query('DELETE FROM push_tokens WHERE user_id = $1', [user_id]);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Ошибка удаления push-токенов:', e);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
 // Получить полный push-токен по user_id (только для админа)
 app.get('/api/admin/push-token-full', authenticate, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
